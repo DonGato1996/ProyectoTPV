@@ -220,6 +220,12 @@ app.post('/pedido/vaciar', (req, res) => {
     res.json({ ok: true });
 });
 
+// Mantener servidor activo en Railway
+setInterval(() => {
+    const http = require('https');
+    http.get('https://proyectotpv-production.up.railway.app/mesas', () => { });
+}, 5 * 60 * 1000);
+
 // ── Arrancar servidor ─────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🍽️  Servidor TPV arrancado`);
