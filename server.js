@@ -1,234 +1,242 @@
 ﻿// ══════════════════════════════════════════════════════════════
-//  TPV - Servidor local (Node.js + Express + SQLite)
+//  TPV - Servidor local (Node.js + Express + sql.js)
 //  Arrancar con: node server.js
-//  Puerto: 3000
 // ══════════════════════════════════════════════════════════════
 
 const express = require('express');
-const Database = require('better-sqlite3');
 const path = require('path');
+const fs = require('fs');
+const initSqlJs = require('sql.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const DB_PATH = path.join(__dirname, 'tpv.db');
 
 app.use(express.json());
 
-// ── Base de datos ─────────────────────────────────────────────
-const db = new Database(path.join(__dirname, 'tpv.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+let db; // instancia de sql.js
 
-// ── Crear tablas ──────────────────────────────────────────────
-db.exec(`
-    CREATE TABLE IF NOT EXISTS Empleado (
-        id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT    NOT NULL,
-        codigo TEXT    NOT NULL UNIQUE
-    );
-
-    CREATE TABLE IF NOT EXISTS Articulo (
-        id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT    NOT NULL,
-        precio REAL    NOT NULL,
-        tipo   TEXT    NOT NULL CHECK(tipo IN ('Bebida','Comida','Alcohol','Varios'))
-    );
-
-    CREATE TABLE IF NOT EXISTS Mesa (
-        id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero INTEGER NOT NULL UNIQUE,
-        estado TEXT    NOT NULL DEFAULT 'libre' CHECK(estado IN ('libre','ocupada'))
-    );
-
-    CREATE TABLE IF NOT EXISTS Pedido (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        id_mesa     INTEGER NOT NULL REFERENCES Mesa(id),
-        id_empleado INTEGER NOT NULL REFERENCES Empleado(id),
-        fecha_hora  TEXT    NOT NULL DEFAULT (datetime('now')),
-        estado      TEXT    NOT NULL DEFAULT 'abierto'
-                    CHECK(estado IN ('abierto','enviado','cerrado'))
-    );
-
-    CREATE TABLE IF NOT EXISTS LineaPedido (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        id_pedido     INTEGER NOT NULL REFERENCES Pedido(id),
-        id_articulo   INTEGER NOT NULL REFERENCES Articulo(id),
-        cantidad      INTEGER NOT NULL DEFAULT 1,
-        precio_unidad REAL    NOT NULL,
-        UNIQUE(id_pedido, id_articulo)
-    );
-`);
-
-// ── Datos de prueba ───────────────────────────────────────────
-const hayEmpleados = db.prepare('SELECT COUNT(*) as n FROM Empleado').get();
-if (hayEmpleados.n === 0) {
-    const insEmp = db.prepare('INSERT INTO Empleado (nombre, codigo) VALUES (?, ?)');
-    insEmp.run('Admin', '1234');
-    insEmp.run('María', '2222');
-    insEmp.run('Carlos', '3333');
-
-    const insArt = db.prepare('INSERT INTO Articulo (nombre, precio, tipo) VALUES (?, ?, ?)');
-    insArt.run('Cocacola', 2.5, 'Bebida');
-    insArt.run('Nestea', 2.5, 'Bebida');
-    insArt.run('Agua', 1.5, 'Bebida');
-    insArt.run('Zumo naranja', 2.8, 'Bebida');
-    insArt.run('Café con leche', 1.8, 'Bebida');
-    insArt.run('Cerveza', 2.0, 'Alcohol');
-    insArt.run('Vino tinto', 2.5, 'Alcohol');
-    insArt.run('Copa gin-tonic', 7.0, 'Alcohol');
-    insArt.run('Bocadillo calamares', 4.5, 'Comida');
-    insArt.run('Bocadillo jamón', 4.0, 'Comida');
-    insArt.run('Tosta mixta', 3.5, 'Comida');
-    insArt.run('Pincho tortilla', 2.5, 'Comida');
-    insArt.run('Ensalada mixta', 6.0, 'Comida');
-    insArt.run('Plato del día', 9.5, 'Comida');
-    insArt.run('Pan', 0.5, 'Varios');
-    insArt.run('Cubierto', 1.0, 'Varios');
-
-    const insMesa = db.prepare('INSERT INTO Mesa (numero) VALUES (?)');
-    for (let i = 1; i <= 10; i++) insMesa.run(i);
-
-    console.log('✅ Datos de prueba insertados');
+// ── Guardar la BBDD en disco ──────────────────────────────────
+function guardarDB() {
+    const data = db.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
 
-// ════════════════════════════════════════════════════════════
-//  ENDPOINTS — todos devuelven objetos JSON, nunca arrays sueltos
-// ════════════════════════════════════════════════════════════
+// ── Inicializar BBDD ──────────────────────────────────────────
+async function inicializar() {
+    const SQL = await initSqlJs();
 
-// ── POST /login ──────────────────────────────────────────────
-// Body:     { "codigo": "1234" }
-// Éxito:    { "ok": true,  "idEmpleado": 1, "nombre": "Admin" }
-// Fallo:    { "ok": false }
-app.post('/login', (req, res) => {
-    const { codigo } = req.body;
-    const emp = db.prepare(
-        'SELECT id, nombre FROM Empleado WHERE codigo = ?'
-    ).get(codigo);
-
-    if (emp) {
-        res.json({ ok: true, idEmpleado: emp.id, nombre: emp.nombre });
+    if (fs.existsSync(DB_PATH)) {
+        const fileBuffer = fs.readFileSync(DB_PATH);
+        db = new SQL.Database(fileBuffer);
+        console.log('✅ Base de datos cargada desde disco');
     } else {
-        res.json({ ok: false });
-    }
-});
-
-// ── GET /mesas ───────────────────────────────────────────────
-// Respuesta: { "mesas": [ { "numero": 1, "estado": "libre" }, ... ] }
-app.get('/mesas', (req, res) => {
-    const mesas = db.prepare(
-        'SELECT numero, estado FROM Mesa ORDER BY numero'
-    ).all();
-    res.json({ mesas });
-});
-
-// ── GET /articulos/:tipo ─────────────────────────────────────
-// Respuesta: { "articulos": [ { "id": 1, "nombre": "Cocacola", "precio": 2.5 }, ... ] }
-app.get('/articulos/:tipo', (req, res) => {
-    const articulos = db.prepare(
-        'SELECT id, nombre, precio FROM Articulo WHERE tipo = ? ORDER BY nombre'
-    ).all(req.params.tipo);
-    res.json({ articulos });
-});
-
-// ── GET /pedido/:numeroMesa ──────────────────────────────────
-// Respuesta: { "idPedido": 5, "lineas": [ { "nombre", "cantidad", "precioUnidad" } ] }
-//         ó  { "idPedido": -1, "lineas": [] }
-app.get('/pedido/:numeroMesa', (req, res) => {
-    const pedido = db.prepare(`
-        SELECT p.id FROM Pedido p
-        JOIN Mesa m ON m.id = p.id_mesa
-        WHERE m.numero = ? AND p.estado = 'abierto'
-    `).get(req.params.numeroMesa);
-
-    if (!pedido) return res.json({ idPedido: -1, lineas: [] });
-
-    const lineas = db.prepare(`
-        SELECT a.nombre, lp.cantidad, lp.precio_unidad AS precioUnidad
-        FROM LineaPedido lp
-        JOIN Articulo a ON a.id = lp.id_articulo
-        WHERE lp.id_pedido = ?
-        ORDER BY a.nombre
-    `).all(pedido.id);
-
-    res.json({ idPedido: pedido.id, lineas });
-});
-
-// ── POST /pedido/anadir ──────────────────────────────────────
-// Body:     { "numeroMesa": 1, "idEmpleado": 1, "idArticulo": 3, "precioUnidad": 2.5 }
-// Respuesta: { "ok": true, "idPedido": 5 }
-app.post('/pedido/anadir', (req, res) => {
-    const { numeroMesa, idEmpleado, idArticulo, precioUnidad } = req.body;
-
-    const mesa = db.prepare('SELECT id FROM Mesa WHERE numero = ?').get(numeroMesa);
-    if (!mesa) return res.json({ ok: false, error: 'Mesa no encontrada' });
-
-    let pedido = db.prepare(
-        "SELECT id FROM Pedido WHERE id_mesa = ? AND estado = 'abierto'"
-    ).get(mesa.id);
-
-    if (!pedido) {
-        const info = db.prepare(
-            'INSERT INTO Pedido (id_mesa, id_empleado) VALUES (?, ?)'
-        ).run(mesa.id, idEmpleado);
-        pedido = { id: info.lastInsertRowid };
-        db.prepare("UPDATE Mesa SET estado = 'ocupada' WHERE id = ?").run(mesa.id);
+        db = new SQL.Database();
+        console.log('✅ Base de datos nueva creada');
     }
 
-    const linea = db.prepare(
-        'SELECT id, cantidad FROM LineaPedido WHERE id_pedido = ? AND id_articulo = ?'
-    ).get(pedido.id, idArticulo);
+    // Crear tablas
+    db.run(`
+        CREATE TABLE IF NOT EXISTS Empleado (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT    NOT NULL,
+            codigo TEXT    NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS Articulo (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT    NOT NULL,
+            precio REAL    NOT NULL,
+            tipo   TEXT    NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS Mesa (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero INTEGER NOT NULL UNIQUE,
+            estado TEXT    NOT NULL DEFAULT 'libre'
+        );
+        CREATE TABLE IF NOT EXISTS Pedido (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_mesa     INTEGER NOT NULL,
+            id_empleado INTEGER NOT NULL,
+            fecha_hora  TEXT    NOT NULL DEFAULT (datetime('now')),
+            estado      TEXT    NOT NULL DEFAULT 'abierto'
+        );
+        CREATE TABLE IF NOT EXISTS LineaPedido (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_pedido     INTEGER NOT NULL,
+            id_articulo   INTEGER NOT NULL,
+            cantidad      INTEGER NOT NULL DEFAULT 1,
+            precio_unidad REAL    NOT NULL,
+            UNIQUE(id_pedido, id_articulo)
+        );
+    `);
 
-    if (linea) {
-        db.prepare('UPDATE LineaPedido SET cantidad = ? WHERE id = ?')
-            .run(linea.cantidad + 1, linea.id);
-    } else {
-        db.prepare(
-            'INSERT INTO LineaPedido (id_pedido, id_articulo, cantidad, precio_unidad) VALUES (?, ?, 1, ?)'
-        ).run(pedido.id, idArticulo, precioUnidad);
+    // Datos de prueba si está vacío
+    const res = db.exec('SELECT COUNT(*) as n FROM Empleado');
+    const n = res[0].values[0][0];
+
+    if (n === 0) {
+        db.run("INSERT INTO Empleado (nombre, codigo) VALUES ('Admin',  '1234')");
+        db.run("INSERT INTO Empleado (nombre, codigo) VALUES ('María',  '2222')");
+        db.run("INSERT INTO Empleado (nombre, codigo) VALUES ('Carlos', '3333')");
+
+        const arts = [
+            ['Cocacola', 2.5, 'Bebida'], ['Nestea', 2.5, 'Bebida'],
+            ['Agua', 1.5, 'Bebida'], ['Zumo naranja', 2.8, 'Bebida'],
+            ['Café con leche', 1.8, 'Bebida'], ['Cerveza', 2.0, 'Alcohol'],
+            ['Vino tinto', 2.5, 'Alcohol'], ['Copa gin-tonic', 7.0, 'Alcohol'],
+            ['Bocadillo calamares', 4.5, 'Comida'], ['Bocadillo jamón', 4.0, 'Comida'],
+            ['Tosta mixta', 3.5, 'Comida'], ['Pincho tortilla', 2.5, 'Comida'],
+            ['Ensalada mixta', 6.0, 'Comida'], ['Plato del día', 9.5, 'Comida'],
+            ['Pan', 0.5, 'Varios'], ['Cubierto', 1.0, 'Varios']
+        ];
+        arts.forEach(([n, p, t]) =>
+            db.run('INSERT INTO Articulo (nombre, precio, tipo) VALUES (?, ?, ?)', [n, p, t])
+        );
+
+        for (let i = 1; i <= 10; i++) {
+            db.run('INSERT INTO Mesa (numero) VALUES (?)', [i]);
+        }
+
+        guardarDB();
+        console.log('✅ Datos de prueba insertados');
     }
 
-    res.json({ ok: true, idPedido: pedido.id });
-});
+    // ── Helpers ──────────────────────────────────────────────
+    function queryAll(sql, params = []) {
+        const res = db.exec(sql, params);
+        if (!res.length) return [];
+        const { columns, values } = res[0];
+        return values.map(row =>
+            Object.fromEntries(columns.map((c, i) => [c, row[i]]))
+        );
+    }
 
-// ── POST /pedido/enviar ──────────────────────────────────────
-// Body:     { "idPedido": 5, "numeroMesa": 1 }
-// Respuesta: { "ok": true }
-app.post('/pedido/enviar', (req, res) => {
-    const { idPedido } = req.body;
-    db.prepare("UPDATE Pedido SET estado = 'enviado' WHERE id = ?").run(idPedido);
-    // Mesa sigue ocupada — no liberamos
-    res.json({ ok: true });
-});
+    function queryOne(sql, params = []) {
+        const rows = queryAll(sql, params);
+        return rows.length ? rows[0] : null;
+    }
 
-// ── POST /pedido/cobrar ──────────────────────────────────────
-// Body:     { "idPedido": 5, "numeroMesa": 1 }
-// Respuesta: { "ok": true }
-app.post('/pedido/cobrar', (req, res) => {
-    const { idPedido, numeroMesa } = req.body;
-    db.prepare("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?").run(idPedido);
-    db.prepare("UPDATE Mesa SET estado = 'libre' WHERE numero = ?").run(numeroMesa);
-    res.json({ ok: true });
-});
+    // ════════════════════════════════════════════════════════
+    //  ENDPOINTS
+    // ════════════════════════════════════════════════════════
 
-// ── POST /pedido/vaciar ──────────────────────────────────────
-// Body:     { "idPedido": 5, "numeroMesa": 1 }
-// Respuesta: { "ok": true }
-app.post('/pedido/vaciar', (req, res) => {
-    const { idPedido, numeroMesa } = req.body;
-    db.prepare('DELETE FROM LineaPedido WHERE id_pedido = ?').run(idPedido);
-    db.prepare("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?").run(idPedido);
-    db.prepare("UPDATE Mesa SET estado = 'libre' WHERE numero = ?").run(numeroMesa);
-    res.json({ ok: true });
-});
+    // POST /login
+    app.post('/login', (req, res) => {
+        const { codigo } = req.body;
+        const emp = queryOne('SELECT id, nombre FROM Empleado WHERE codigo = ?', [codigo]);
+        if (emp) res.json({ ok: true, idEmpleado: emp.id, nombre: emp.nombre });
+        else res.json({ ok: false });
+    });
 
-// Mantener servidor activo en Railway
-setInterval(() => {
-    const http = require('https');
-    http.get('https://proyectotpv-production.up.railway.app/mesas', () => { });
-}, 5 * 60 * 1000);
+    // GET /mesas
+    app.get('/mesas', (req, res) => {
+        const mesas = queryAll('SELECT numero, estado FROM Mesa ORDER BY numero');
+        res.json({ mesas });
+    });
 
-// ── Arrancar servidor ─────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🍽️  Servidor TPV arrancado`);
-    console.log(`📡 Escuchando en http://0.0.0.0:${PORT}`);
-    console.log(`\n👉 Desde los móviles usa: http://192.168.0.15:${PORT}\n`);
-});
+    // GET /articulos/:tipo
+    app.get('/articulos/:tipo', (req, res) => {
+        const articulos = queryAll(
+            'SELECT id, nombre, precio FROM Articulo WHERE tipo = ? ORDER BY nombre',
+            [req.params.tipo]
+        );
+        res.json({ articulos });
+    });
+
+    // GET /pedido/:numeroMesa
+    app.get('/pedido/:numeroMesa', (req, res) => {
+        const pedido = queryOne(`
+            SELECT p.id FROM Pedido p
+            JOIN Mesa m ON m.id = p.id_mesa
+            WHERE m.numero = ? AND p.estado IN ('abierto','enviado')
+        `, [req.params.numeroMesa]);
+
+        if (!pedido) return res.json({ idPedido: -1, lineas: [] });
+
+        const lineas = queryAll(`
+            SELECT a.nombre, lp.cantidad, lp.precio_unidad AS precioUnidad
+            FROM LineaPedido lp
+            JOIN Articulo a ON a.id = lp.id_articulo
+            WHERE lp.id_pedido = ?
+            ORDER BY a.nombre
+        `, [pedido.id]);
+
+        res.json({ idPedido: pedido.id, lineas });
+    });
+
+    // POST /pedido/anadir
+    app.post('/pedido/anadir', (req, res) => {
+        const { numeroMesa, idEmpleado, idArticulo, precioUnidad } = req.body;
+
+        const mesa = queryOne('SELECT id FROM Mesa WHERE numero = ?', [numeroMesa]);
+        if (!mesa) return res.json({ ok: false, error: 'Mesa no encontrada' });
+
+        let pedido = queryOne(
+            "SELECT id FROM Pedido WHERE id_mesa = ? AND estado IN ('abierto','enviado')",
+            [mesa.id]
+        );
+
+        if (!pedido) {
+            db.run('INSERT INTO Pedido (id_mesa, id_empleado) VALUES (?, ?)', [mesa.id, idEmpleado]);
+            pedido = queryOne('SELECT last_insert_rowid() as id');
+            db.run("UPDATE Mesa SET estado = 'ocupada' WHERE id = ?", [mesa.id]);
+            guardarDB();
+        }
+
+        const linea = queryOne(
+            'SELECT id, cantidad FROM LineaPedido WHERE id_pedido = ? AND id_articulo = ?',
+            [pedido.id, idArticulo]
+        );
+
+        if (linea) {
+            db.run('UPDATE LineaPedido SET cantidad = ? WHERE id = ?', [linea.cantidad + 1, linea.id]);
+        } else {
+            db.run(
+                'INSERT INTO LineaPedido (id_pedido, id_articulo, cantidad, precio_unidad) VALUES (?, ?, 1, ?)',
+                [pedido.id, idArticulo, precioUnidad]
+            );
+        }
+        guardarDB();
+        res.json({ ok: true, idPedido: pedido.id });
+    });
+
+    // POST /pedido/enviar
+    app.post('/pedido/enviar', (req, res) => {
+        const { idPedido } = req.body;
+        db.run("UPDATE Pedido SET estado = 'enviado' WHERE id = ?", [idPedido]);
+        guardarDB();
+        res.json({ ok: true });
+    });
+
+    // POST /pedido/cobrar
+    app.post('/pedido/cobrar', (req, res) => {
+        const { idPedido, numeroMesa } = req.body;
+        db.run("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?", [idPedido]);
+        db.run("UPDATE Mesa SET estado = 'libre' WHERE numero = ?", [numeroMesa]);
+        guardarDB();
+        res.json({ ok: true });
+    });
+
+    // POST /pedido/vaciar
+    app.post('/pedido/vaciar', (req, res) => {
+        const { idPedido, numeroMesa } = req.body;
+        db.run('DELETE FROM LineaPedido WHERE id_pedido = ?', [idPedido]);
+        db.run("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?", [idPedido]);
+        db.run("UPDATE Mesa SET estado = 'libre' WHERE numero = ?", [numeroMesa]);
+        guardarDB();
+        res.json({ ok: true });
+    });
+
+    // Mantener servidor activo
+    setInterval(() => {
+        const https = require('https');
+        https.get('https://proyectotpv-production.up.railway.app/mesas', () => { });
+    }, 5 * 60 * 1000);
+
+    // Arrancar
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n🍽️  Servidor TPV arrancado en puerto ${PORT}\n`);
+    });
+}
+
+inicializar().catch(console.error);
