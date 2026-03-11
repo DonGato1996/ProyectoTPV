@@ -1,9 +1,4 @@
-﻿// ══════════════════════════════════════════════════════════════
-//  TPV - Servidor local (Node.js + Express + sql.js)
-//  Arrancar con: node server.js
-// ══════════════════════════════════════════════════════════════
-
-const express = require('express');
+﻿const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const initSqlJs = require('sql.js');
@@ -14,15 +9,13 @@ const DB_PATH = path.join(__dirname, 'tpv.db');
 
 app.use(express.json());
 
-let db; // instancia de sql.js
+let db;
 
-// ── Guardar la BBDD en disco ──────────────────────────────────
 function guardarDB() {
     const data = db.export();
     fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
 
-// ── Inicializar BBDD ──────────────────────────────────────────
 async function inicializar() {
     const SQL = await initSqlJs();
 
@@ -35,7 +28,6 @@ async function inicializar() {
         console.log('✅ Base de datos nueva creada');
     }
 
-    // Crear tablas
     db.run(`
         CREATE TABLE IF NOT EXISTS Empleado (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,9 +60,14 @@ async function inicializar() {
             precio_unidad REAL    NOT NULL,
             UNIQUE(id_pedido, id_articulo)
         );
+        CREATE TABLE IF NOT EXISTS VentaDia (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha      TEXT    NOT NULL DEFAULT (date('now')),
+            total      REAL    NOT NULL,
+            id_pedido  INTEGER NOT NULL
+        );
     `);
 
-    // Datos de prueba si está vacío
     const res = db.exec('SELECT COUNT(*) as n FROM Empleado');
     const n = res[0].values[0][0];
 
@@ -101,7 +98,7 @@ async function inicializar() {
         console.log('✅ Datos de prueba insertados');
     }
 
-    // ── Helpers ──────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────
     function queryAll(sql, params = []) {
         const res = db.exec(sql, params);
         if (!res.length) return [];
@@ -116,9 +113,9 @@ async function inicializar() {
         return rows.length ? rows[0] : null;
     }
 
-    // ════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════
     //  ENDPOINTS
-    // ════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════
 
     // POST /login
     app.post('/login', (req, res) => {
@@ -180,7 +177,6 @@ async function inicializar() {
             db.run('INSERT INTO Pedido (id_mesa, id_empleado) VALUES (?, ?)', [mesa.id, idEmpleado]);
             pedido = queryOne('SELECT last_insert_rowid() as id');
             db.run("UPDATE Mesa SET estado = 'ocupada' WHERE id = ?", [mesa.id]);
-            guardarDB();
         }
 
         const linea = queryOne(
@@ -208,11 +204,12 @@ async function inicializar() {
         res.json({ ok: true });
     });
 
-    // POST /pedido/cobrar
+    // POST /pedido/cobrar — guarda el total en VentaDia
     app.post('/pedido/cobrar', (req, res) => {
-        const { idPedido, numeroMesa } = req.body;
+        const { idPedido, numeroMesa, total } = req.body;
         db.run("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?", [idPedido]);
         db.run("UPDATE Mesa SET estado = 'libre' WHERE numero = ?", [numeroMesa]);
+        db.run("INSERT INTO VentaDia (total, id_pedido) VALUES (?, ?)", [total || 0, idPedido]);
         guardarDB();
         res.json({ ok: true });
     });
@@ -227,13 +224,49 @@ async function inicializar() {
         res.json({ ok: true });
     });
 
+    // POST /pedido/mover — mueve el pedido de una mesa a otra
+    app.post('/pedido/mover', (req, res) => {
+        const { idPedido, mesaOrigenNumero, mesaDestinoNumero } = req.body;
+
+        const mesaDestino = queryOne('SELECT id FROM Mesa WHERE numero = ?', [mesaDestinoNumero]);
+        if (!mesaDestino) return res.json({ ok: false, error: 'Mesa destino no encontrada' });
+
+        // Cerrar pedido abierto en la mesa destino si existe
+        const pedidoDestino = queryOne(
+            "SELECT id FROM Pedido WHERE id_mesa = ? AND estado IN ('abierto','enviado')",
+            [mesaDestino.id]
+        );
+        if (pedidoDestino) {
+            db.run('DELETE FROM LineaPedido WHERE id_pedido = ?', [pedidoDestino.id]);
+            db.run("UPDATE Pedido SET estado = 'cerrado' WHERE id = ?", [pedidoDestino.id]);
+        }
+
+        // Mover el pedido a la mesa destino
+        db.run('UPDATE Pedido SET id_mesa = ? WHERE id = ?', [mesaDestino.id, idPedido]);
+        db.run("UPDATE Mesa SET estado = 'libre' WHERE numero = ?", [mesaOrigenNumero]);
+        db.run("UPDATE Mesa SET estado = 'ocupada' WHERE numero = ?", [mesaDestinoNumero]);
+
+        guardarDB();
+        res.json({ ok: true });
+    });
+
+    // GET /cierre — total del día actual
+    app.get('/cierre', (req, res) => {
+        const resultado = queryOne(
+            "SELECT COALESCE(SUM(total), 0) AS totalDia, COUNT(*) AS numPedidos FROM VentaDia WHERE fecha = date('now')"
+        );
+        res.json({
+            totalDia: resultado ? resultado.totalDia : 0,
+            numPedidos: resultado ? resultado.numPedidos : 0
+        });
+    });
+
     // Mantener servidor activo
     setInterval(() => {
         const https = require('https');
         https.get('https://proyectotpv-production.up.railway.app/mesas', () => { });
     }, 5 * 60 * 1000);
 
-    // Arrancar
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`\n🍽️  Servidor TPV arrancado en puerto ${PORT}\n`);
     });
